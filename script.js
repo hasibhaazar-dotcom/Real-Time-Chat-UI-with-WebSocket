@@ -1,164 +1,363 @@
 const wsUrl = "wss://echo.websocket.events/";
-let ws;
-let retryDelay = 1000;
-let queue = [];
 
-const messages = document.getElementById("messages");
-const input = document.getElementById("messageInput");
+let socket;
+let reconnectDelay = 1000;
+let messageQueue = [];
+let uploadedImage = null;
+
+const messagesContainer = document.getElementById("messages");
+const messageInput = document.getElementById("messageInput");
 const sendBtn = document.getElementById("sendBtn");
 const statusDot = document.getElementById("statusDot");
 const statusText = document.getElementById("statusText");
-const typing = document.getElementById("typingIndicator");
+const typingIndicator = document.getElementById("typingIndicator");
 const charCount = document.getElementById("charCount");
+
 const uploadBtn = document.getElementById("uploadBtn");
 const imageUpload = document.getElementById("imageUpload");
 const previewBox = document.getElementById("previewBox");
 const previewImage = document.getElementById("previewImage");
+const removePreview = document.getElementById("removePreview");
 
-let uploadedImage = null;
+const autoReplies = [
+    "Hey there 👋",
+    "That's interesting!",
+    "Nice 😊",
+    "Tell me more.",
+    "Sounds great 👍",
+    "I completely agree.",
+    "Cool 😎",
+    "That's awesome!",
+    "How was your day?",
+    "Good idea!",
+    "Really?",
+    "Can you explain more?"
+];
 
-function connect() {
-    ws = new WebSocket(wsUrl);
+/* ===========================
+   WebSocket Connection
+=========================== */
 
-    ws.onopen = () => {
-        statusDot.style.background = "green";
-        statusText.textContent = "Connected";
-        retryDelay = 1000;
+function connectSocket() {
 
-        queue.forEach(msg => ws.send(msg));
-        queue = [];
+    socket = new WebSocket(wsUrl);
+
+    socket.onopen = () => {
+        updateStatus("Connected", "#22c55e");
+
+        reconnectDelay = 1000;
+
+        while (messageQueue.length) {
+            socket.send(messageQueue.shift());
+        }
     };
 
-    ws.onmessage = (e) => {
-        addMessage(e.data, "received");
-        simulateReadReceipt();
-        notify("New message", e.data);
+    socket.onmessage = () => {
+        // Ignore echo server response
     };
 
-    ws.onclose = () => {
-        statusDot.style.background = "red";
-        statusText.textContent = "Disconnected";
+    socket.onerror = () => {
+        updateStatus("Connection Error", "#ef4444");
+    };
+
+    socket.onclose = () => {
+
+        updateStatus("Reconnecting...", "#f59e0b");
 
         setTimeout(() => {
-            statusDot.style.background = "orange";
-            statusText.textContent = "Reconnecting...";
-            connect();
-            retryDelay = Math.min(retryDelay * 2, 30000);
-        }, retryDelay);
+            connectSocket();
+        }, reconnectDelay);
+
+        reconnectDelay = Math.min(reconnectDelay * 2, 30000);
     };
 }
 
-connect();
+connectSocket();
 
-function addMessage(text, type) {
-    const div = document.createElement("div");
-    div.className = `message ${type}`;
+/* ===========================
+   Status
+=========================== */
 
-    div.innerHTML = `
-        ${text}
-        <div class="timestamp">${timeAgo()}</div>
+function updateStatus(text, color) {
+    statusText.textContent = text;
+    statusDot.style.background = color;
+}
+
+/* ===========================
+   Message Creation
+=========================== */
+
+function createMessage(content, type) {
+
+    const message = document.createElement("div");
+    message.className = `message ${type}`;
+
+    message.innerHTML = `
+        <div class="message-content">
+            ${content}
+        </div>
+
+        <div class="timestamp">
+            ${getCurrentTime()}
+            ${type === "sent"
+                ? '<span class="read-receipt">✓✓</span>'
+                : ""}
+        </div>
+
         <div class="reactions">
-            <button onclick="react(this,'👍')">👍</button>
-            <button onclick="react(this,'❤️')">❤️</button>
-            <button onclick="react(this,'😂')">😂</button>
+            <button class="reaction-btn">👍</button>
+            <button class="reaction-btn">❤️</button>
+            <button class="reaction-btn">😂</button>
         </div>
     `;
 
-    messages.appendChild(div);
-    messages.scrollTop = messages.scrollHeight;
+    const reactionButtons =
+        message.querySelectorAll(".reaction-btn");
+
+    reactionButtons.forEach(btn => {
+        btn.addEventListener("click", () => {
+            btn.textContent = btn.textContent + " 1";
+            btn.disabled = true;
+        });
+    });
+
+    messagesContainer.appendChild(message);
+
+    messagesContainer.scrollTop =
+        messagesContainer.scrollHeight;
 }
+
+/* ===========================
+   Send Message
+=========================== */
 
 function sendMessage() {
-    let text = input.value.trim();
+
+    const text = messageInput.value.trim();
+
     if (!text && !uploadedImage) return;
 
+    let content = "";
+
+    if (text) {
+        content += text;
+    }
+
     if (uploadedImage) {
-        text += `<br><img src="${uploadedImage}" width="150">`;
+        content += `
+            <div class="image-message">
+                <img src="${uploadedImage}">
+            </div>
+        `;
     }
 
-    addMessage(text, "sent");
+    createMessage(content, "sent");
 
-    if (ws.readyState === 1) {
-        ws.send(text);
+    if (socket.readyState === WebSocket.OPEN) {
+        socket.send(text);
     } else {
-        queue.push(text);
+        messageQueue.push(text);
     }
 
-    input.value = "";
+    messageInput.value = "";
     uploadedImage = null;
-    previewBox.classList.add("hidden");
-    charCount.textContent = "0 / 500";
 
-    simulateTyping();
+    previewBox.classList.add("hidden");
+
+    updateCharacterCount();
+
+    simulateReply();
 }
 
-sendBtn.onclick = sendMessage;
+/* ===========================
+   Auto Reply
+=========================== */
 
-input.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && !e.shiftKey) {
-        e.preventDefault();
-        sendMessage();
-    }
-});
+function simulateReply() {
 
-input.addEventListener("input", () => {
-    charCount.textContent = `${input.value.length} / 500`;
+    typingIndicator.classList.remove("hidden");
 
-    if (input.value.length > 500) {
-        charCount.style.color = "red";
-    } else {
-        charCount.style.color = "#555";
-    }
-});
-
-function simulateTyping() {
-    typing.classList.remove("hidden");
+    const delay =
+        Math.floor(Math.random() * 2000) + 1000;
 
     setTimeout(() => {
-        typing.classList.add("hidden");
-    }, 2000);
+
+        typingIndicator.classList.add("hidden");
+
+        const randomReply =
+            autoReplies[
+                Math.floor(
+                    Math.random() * autoReplies.length
+                )
+            ];
+
+        createMessage(randomReply, "received");
+
+        showNotification(
+            "Zara Quinn",
+            randomReply
+        );
+
+    }, delay);
 }
 
-function simulateReadReceipt() {
-    console.log("Read receipt");
+/* ===========================
+   Time
+=========================== */
+
+function getCurrentTime() {
+
+    return new Date().toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit"
+    });
 }
 
-function react(button, emoji) {
-    button.innerText = emoji + " 1";
+/* ===========================
+   Character Counter
+=========================== */
+
+function updateCharacterCount() {
+
+    const length = messageInput.value.length;
+
+    charCount.textContent =
+        `${length} / 500`;
+
+    charCount.style.color =
+        length > 450
+            ? "#ef4444"
+            : "#64748b";
 }
 
-function timeAgo() {
-    return "Just now";
-}
+messageInput.addEventListener(
+    "input",
+    updateCharacterCount
+);
 
-uploadBtn.onclick = () => imageUpload.click();
+/* ===========================
+   Send Events
+=========================== */
 
-imageUpload.onchange = (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
+sendBtn.addEventListener(
+    "click",
+    sendMessage
+);
 
-    const reader = new FileReader();
+messageInput.addEventListener(
+    "keydown",
+    (e) => {
 
-    reader.onload = function(event) {
-        uploadedImage = event.target.result;
-        previewImage.src = uploadedImage;
-        previewBox.classList.remove("hidden");
-    };
-
-    reader.readAsDataURL(file);
-};
-
-function notify(title, body) {
-    if (Notification.permission === "granted") {
-        new Notification(title, { body });
+        if (
+            e.key === "Enter" &&
+            !e.shiftKey
+        ) {
+            e.preventDefault();
+            sendMessage();
+        }
     }
-}
+);
 
-if (Notification.permission !== "granted") {
+/* ===========================
+   Image Upload
+=========================== */
+
+uploadBtn.addEventListener(
+    "click",
+    () => imageUpload.click()
+);
+
+imageUpload.addEventListener(
+    "change",
+    e => {
+
+        const file = e.target.files[0];
+
+        if (!file) return;
+
+        const reader =
+            new FileReader();
+
+        reader.onload = event => {
+
+            uploadedImage =
+                event.target.result;
+
+            previewImage.src =
+                uploadedImage;
+
+            previewBox.classList.remove(
+                "hidden"
+            );
+        };
+
+        reader.readAsDataURL(file);
+    }
+);
+
+removePreview.addEventListener(
+    "click",
+    () => {
+
+        uploadedImage = null;
+
+        imageUpload.value = "";
+
+        previewBox.classList.add(
+            "hidden"
+        );
+    }
+);
+
+/* ===========================
+   Browser Notification
+=========================== */
+
+if (
+    "Notification" in window &&
+    Notification.permission !== "granted"
+) {
     Notification.requestPermission();
 }
 
-/* Virtual Scroll Simulation */
-for (let i = 1; i <= 30; i++) {
-    addMessage("History message " + i, i % 2 ? "received" : "sent");
+function showNotification(
+    title,
+    body
+) {
+
+    if (
+        "Notification" in window &&
+        Notification.permission === "granted"
+    ) {
+
+        new Notification(title, {
+            body: body
+        });
+    }
 }
+
+/* ===========================
+   Demo History Messages
+=========================== */
+
+const historyMessages = [
+    {
+        type: "received",
+        text: "Hi! I'm Zara Quinn 👋"
+    },
+    {
+        type: "sent",
+        text: "Hello!"
+    },
+    {
+        type: "received",
+        text: "Welcome to ChatSphere."
+    }
+];
+
+historyMessages.forEach(msg => {
+    createMessage(
+        msg.text,
+        msg.type
+    );
+});
